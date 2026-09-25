@@ -1,0 +1,39 @@
+.daily-vip-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 2px 8px;
+}
+
+.daily-vip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.daily-vip-label {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.daily-vip-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--control-muted-bg, rgba(127, 127, 127, 0.12));
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.daily-vip-status-line {
+  opacity: 0.75;
+  word-break: break-all;
+}
+
+.daily-vip-actions {
+  display: flex;
+  gap: 8px;
+}
