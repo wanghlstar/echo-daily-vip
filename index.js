@@ -20,6 +20,8 @@ const DEFAULTS = {
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
 const BOOT_RETRY = 10; // 启动时探测登录态的重试次数
 const BOOT_RETRY_DELAY = 2500; // 每次重试间隔（ms）
+const AUTO_MIN_GAP = 5 * 60 * 1000; // 事件触发的自动领取最小间隔，避免连续切歌反复打接口
+const MAX_UPGRADE_FAILS = 3; // 当日升级失败达到此次数后，当天不再重试（无资格账号防刷）
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -100,6 +102,10 @@ export function activate(ctx) {
     lastRunAt: 0,
     lastMessage: "",
     nextCheckAt: 0,
+    doneDate: "", // 今日已领取完成（领取+升级）的日期，命中后自动检查完全休眠
+    upgradeFailDate: "",
+    upgradeFails: 0,
+    lastAutoAttemptAt: 0,
   });
 
   const statusText = computed(() => {
@@ -284,6 +290,23 @@ export function activate(ctx) {
     } finally {
       state.running = false;
       state.lastRunAt = Date.now();
+
+      // 当日升级结果记账：连续失败达到上限后当天不再重试
+      if (result.tvip) {
+        const today = state.today || localBeijingDate();
+        if (state.upgradeFailDate !== today) {
+          state.upgradeFailDate = today;
+          state.upgradeFails = 0;
+        }
+        if (result.svip) state.upgradeFails = 0;
+        else state.upgradeFails += 1;
+      }
+
+      // 领取 + 升级都完成（或升级已确认无资格），今日休眠，不再发任何请求
+      if ((result.already || result.tvip) && (result.svip || state.upgradeFails >= MAX_UPGRADE_FAILS)) {
+        state.doneDate = state.today || localBeijingDate();
+      }
+
       state.lastMessage = result.already
         ? `今日（${state.today || "—"}）已领取过`
         : result.error
@@ -318,9 +341,27 @@ export function activate(ctx) {
     const intervalMs = hours * 3600 * 1000;
     state.nextCheckAt = Date.now() + intervalMs;
     timer = setInterval(() => {
-      if (state.running) return;
-      void runClaim({ manual: false });
+      void autoRun();
     }, intervalMs);
+  };
+
+  // ---------- 自动领取（带休眠判断） ----------
+
+  /** 今日是否已完成领取（本地日期判断，不发请求） */
+  const isDoneToday = () => state.doneDate === localBeijingDate();
+
+  /**
+   * 定时器 / 播放事件共用的自动领取入口：
+   * - 今日已完成 → 直接返回，零请求
+   * - 距上次自动尝试不足 AUTO_MIN_GAP → 跳过，避免连续切歌反复打接口
+   */
+  const autoRun = async () => {
+    if (!state.auto || state.running) return;
+    if (isDoneToday()) return;
+    const now = Date.now();
+    if (now - state.lastAutoAttemptAt < AUTO_MIN_GAP) return;
+    state.lastAutoAttemptAt = now;
+    await runClaim({ manual: false });
   };
 
   // ---------- 设置持久化 ----------
@@ -341,7 +382,9 @@ export function activate(ctx) {
     state.auto = Boolean(value);
     await persist();
     startTimer();
-    if (state.auto) void runClaim({ manual: false });
+    // 用户主动开启：忽略冷却间隔立即尝试一次（今日已完成的仍会休眠）
+    state.lastAutoAttemptAt = 0;
+    if (state.auto) void autoRun();
   };
 
   const onIntervalChange = async (value) => {
@@ -400,12 +443,15 @@ export function activate(ctx) {
                 ? `上次执行：${formatTime(state.lastRunAt)}（${state.lastMessage}）`
                 : "上次执行：尚未执行",
             ),
-            state.auto && state.nextCheckAt
+            state.auto && state.nextCheckAt && !isDoneToday()
               ? h(
                   "div",
                   { class: "daily-vip-status-line" },
                   `下次检查：${formatTime(state.nextCheckAt)}`,
                 )
+              : null,
+            state.auto && isDoneToday()
+              ? h("div", { class: "daily-vip-status-line" }, "今日已领取完成，自动检查已休眠（零请求）")
               : null,
             !state.loggedIn && state.probeReason
               ? h("div", { class: "daily-vip-status-line" }, `探测详情：${state.probeReason}`)
@@ -440,6 +486,13 @@ export function activate(ctx) {
     title: "每日领 VIP",
     component: SettingsPanel,
   });
+
+  // 播放触发：开软件后没赶上启动领取（如启动时接口未就绪）、或跨天首次播放时，立即补领
+  if (ctx.events && typeof ctx.events.onTrackChange === "function") {
+    ctx.events.onTrackChange(() => {
+      void autoRun();
+    });
+  }
 
   // ---------- 启动 ----------
 
